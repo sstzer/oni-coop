@@ -1,0 +1,3 @@
+title: "MultiView Experiment"
+description: "Experiment 1: render an extra off-screen camera into a RenderTexture and dump PNGs every few seconds, to see what ONI's culling leaves out."
+staticID: "mzhang.MultiViewExperiment"

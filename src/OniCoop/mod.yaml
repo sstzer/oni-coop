@@ -1,0 +1,3 @@
+title: "ONI Coop (dev)"
+description: "Multiplayer skeleton: connects to a coop relay server, checks game build / DLC / mods, transfers the host's world to joining players, and shows every player's view and cursor. Does nothing unless configured (config.json or -coop-* launch options)."
+staticID: "mzhang.OniCoop"

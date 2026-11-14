@@ -1,0 +1,3 @@
+title: "Divergence Probe"
+description: "Experiment: loads one save several times in fresh game processes, runs it without input, and records per-tick grid/entity hashes so two runs can be compared. Blocks autosave while running."
+staticID: "mzhang.DivergenceProbe"

@@ -1,0 +1,19 @@
+# Game DLLs and decompiled game code must never be committed
+*.dll
+*.pdb
+decompiled/
+lib/
+
+# Build output
+bin/
+obj/
+dist/
+
+# Experiment output
+captures/
+*.png
+
+# Editors
+.vs/
+.vscode/
+*.user
