@@ -126,6 +126,7 @@ namespace OniCoop
             ReportSync.Reset();
             OperationSync.Reset();
             Feedback.Reset();
+            Meteors.Reset();
             Printing.Reset();
             if (!S.IsHost) EntitySync.UseLocalIds();
             // headroom for the garbage collector: a guest, and the server (its pauses stop every guest's stream)
@@ -308,7 +309,7 @@ namespace OniCoop
                     ServerSpeed.WaitWriter(); // (the server writes the end of its saves in the background)
                     byte[] data = File.ReadAllBytes(path);
                     c.SendSave(0, Path.GetFileName(path), data);
-                    Log.Info($"backup: {Path.GetFileName(path)} ({data.Length / 1048576.0:F1} MB) sent to the relay");
+                    Log.Info($"backup: {Path.GetFileName(path)} ({data.Length / 1048576.0:F1} MB) going to the relay in the background (after the game's messages, {c.BackupRate / 1024} KB/s)");
                 }
                 catch (Exception e) { Log.Warn("backup failed: " + e.Message); }
             }) { IsBackground = true, Name = "coop-backup" }.Start();
@@ -509,7 +510,7 @@ namespace OniCoop
             {
                 Puppets.Mirroring = mirror;
                 Log.Info(mirror ? "mirroring the host's duplicants, critters and cells" : "mirroring off");
-                if (!mirror) { held.Clear(); Feedback.Reset(); Puppets.Reset(); WorldSync.Reset(); EntitySync.Reset(); BuildingSync.Reset(); GlobalSync.Reset(); StatusSync.Reset(); ReportSync.Reset(); OperationSync.Reset(); }
+                if (!mirror) { held.Clear(); Feedback.Reset(); Meteors.Reset(); Puppets.Reset(); WorldSync.Reset(); EntitySync.Reset(); BuildingSync.Reset(); GlobalSync.Reset(); StatusSync.Reset(); ReportSync.Reset(); OperationSync.Reset(); }
             }
             if (!online) return;
             if (S.IsHost)
@@ -520,6 +521,7 @@ namespace OniCoop
                 if (S.IsServer) PauseWhileEmpty(inGame);
                 Puppets.HostTick();
                 Feedback.HostTick();
+                Meteors.HostTick();
                 Printing.HostTick();
                 if (inGame > 0) { BuildingSync.HostTick(Time.realtimeSinceStartup); GlobalSync.HostTick(Time.realtimeSinceStartup); StatusSync.HostTick(Time.realtimeSinceStartup); ReportSync.HostTick(Time.realtimeSinceStartup); OperationSync.HostTick(Time.realtimeSinceStartup); }
                 foreach (MemberInfo m in members)

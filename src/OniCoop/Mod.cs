@@ -34,6 +34,7 @@ namespace OniCoop
             BuildingSync.ApplyPatches(Harmony);
             GcPolicy.ApplyPatches(Harmony);
             Feedback.ApplyPatches(Harmony);
+            Meteors.ApplyPatches(Harmony);
             ServerSpeed.ApplyPatches(Harmony);
             FastSave.ApplyPatches(Harmony);
             ReportSync.ApplyPatches(Harmony);

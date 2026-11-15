@@ -208,6 +208,18 @@ namespace OniCoop
 
         private static MonoBehaviour shotRunner;
 
+        /// <summary>Test: a short, dense meteor shower over the main world (30 s of meteors at once).</summary>
+        private static void StartMeteors()
+        {
+            try
+            {
+                var ev = Db.Get().GameplayEvents.MeteorShowerFullereneEvent;
+                GameplayEventManager.Instance.StartNewEvent(ev, ClusterManager.Instance.activeWorldId);
+                Log.Info($"autotest {(CommandBus.IsHost ? "host" : "guest")}: started a meteor shower");
+            }
+            catch (System.Exception e) { Log.Warn("autotest host: can't start a meteor shower: " + e.Message); }
+        }
+
         /// <summary>Guest: a close-up of a duplicant at work (tool in hand, beam, sparks: PuppetLooks), next frame,
         /// then the camera goes back.</summary>
         private static IEnumerator WorkShot(CoopSettings s, byte n)
@@ -249,6 +261,7 @@ namespace OniCoop
             System.IO.File.WriteAllText(System.IO.Path.Combine(dir, $"{s.name}_sync{n}.txt"), Puppets.Dump());
             System.IO.File.WriteAllText(System.IO.Path.Combine(dir, $"{s.name}_sync{n}_looks.txt"), PuppetLooks.Dump());
             System.IO.File.WriteAllText(System.IO.Path.Combine(dir, $"{s.name}_sync{n}_anims.txt"), BuildingSync.Dump(true));
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, $"{s.name}_sync{n}_movers.txt"), Meteors.Dump());
             Log.Info($"autotest: sync{n}{note} | {Report()}");
             var sb = new System.Text.StringBuilder();
             int k = 0;
@@ -341,7 +354,7 @@ namespace OniCoop
                    $" | puppets: host {Puppets.HostReport()}; guest {Puppets.GuestReport()}, missing anim files {Puppets.MissingAnimFiles}" +
                    $" | entities: {(CommandBus.IsHost ? EntitySync.HostReport() : EntitySync.GuestReport())}" +
                    $" | {BuildingSync.Report()} | {GlobalSync.Report()} | {StatusSync.Report()} | {ReportSync.Report()}" +
-                   $" | {PuppetLooks.Report(CommandBus.IsHost)} | {OperationSync.Report(CommandBus.IsHost)} | {TextParts.Report()} | {Feedback.Report(CommandBus.IsHost)} | {GcPolicy.Report()} | {FastSave.Report()}" +
+                   $" | {PuppetLooks.Report(CommandBus.IsHost)} | {OperationSync.Report(CommandBus.IsHost)} | {TextParts.Report()} | {Feedback.Report(CommandBus.IsHost)} | {Meteors.Report(CommandBus.IsHost)} | {GcPolicy.Report()} | {FastSave.Report()}" +
                    $" | cells: host sent {WorldSync.HostCellsSent} ({WorldSync.HostBytesSent / 1024} KB), guest got {WorldSync.GuestCellsReceived}, applied {WorldSync.GuestCellsApplied}, pinned {WorldSync.GuestCellsPinned}";
         }
 
@@ -667,6 +680,8 @@ namespace OniCoop
             FindDig(anchor, 0, 6, digCells);
             FindTiles(anchor, tileCells);
             FindDig(anchor, 6, 3, hostDigCells); // the host picks these (same scan, after the guest's)
+            // the guest's own game starts a shower too (as its own seasons would): none of its meteors or sky may show
+            if (CoopMod.Settings != null && CoopMod.Settings.testMeteors) StartMeteors();
             Log.Info($"autotest guest: anchor {anchor}, dig [{string.Join(",", digCells.ConvertAll(x => x.ToString()).ToArray())}], tiles [{string.Join(",", tileCells.ConvertAll(x => x.ToString()).ToArray())}]");
             yield return null;
 
@@ -727,6 +742,7 @@ namespace OniCoop
             Log.Info("autotest host: result: " + Report() + $" | executed for guests {CommandBus.Executed}, sent {CommandBus.Sent}");
             for (int i = 0; i < 6; i++)
             {
+                if (s.testMeteors && (i == 0 || i == 2)) StartMeteors();
                 yield return new WaitForSecondsRealtime(8f);
                 if (i == 1) FinishOneTile();   // between shots 1 and 2: a construction completes on the host
                 if (i == 2) StoreOneMinion();  // between shots 2 and 3: a duplicant goes into the rocket's storage
@@ -750,6 +766,7 @@ namespace OniCoop
                 StatusSync.FlushNow();
                 ReportSync.FlushNow();
                 OperationSync.FlushNow();
+                Meteors.FlushNow(System.BitConverter.ToSingle(msg, 1));
                 Log.Info(StatusSync.ByteReport());
                 CommandBus.Client.SendRelay(OniCoop.Net.Proto.TargetAll, ChShot, msg);
                 SyncShot(s, msg);

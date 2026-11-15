@@ -31,7 +31,11 @@ namespace OniCoop
 
         // ================================================================== animations: host
 
-        private struct Last { public bool known; public int anim; public byte mode; public float speed, elapsed, at; }
+        private struct Last { public bool known; public int anim; public byte mode; public float speed, elapsed, at, rot; }
+
+        /// <summary>Host: building parts that turn (a missile launcher's cannon): looked at every frame.</summary>
+        private static readonly HashSet<long> spinning = new HashSet<long>();
+        private static readonly List<KeyValuePair<BRef, int>> spinList = new List<KeyValuePair<BRef, int>>();
 
         /// <summary>Host: which building (and which of its controllers) an animation controller belongs to.</summary>
         private struct Slot { public BRef r; public int i; }
@@ -62,6 +66,8 @@ namespace OniCoop
         {
             refs.Clear();
             slotOf.Clear();
+            spinning.Clear();
+            spinList.Clear();
             hostLive = false;
             buf.SetLength(0);
             records = 0;
@@ -105,6 +111,12 @@ namespace OniCoop
         {
             hostLive = true;
             float stamp = stampOverride >= 0f ? stampOverride : Puppets.Clock;
+            for (int s = spinList.Count - 1; s >= 0; s--)
+            {
+                var kv = spinList[s];
+                if (kv.Key.b == null || kv.Value >= kv.Key.kbacs.Count) { spinning.Remove(((long)(kv.Key.k != null ? kv.Key.k.InstanceID : 0) << 8) | (uint)kv.Value); spinList.RemoveAt(s); continue; }
+                Sample(kv.Key, kv.Value, stamp, false);
+            }
             List<BuildingComplete> list = Components.BuildingCompletes.Items;
             int n = list.Count;
             if (n > 0)
@@ -171,12 +183,16 @@ namespace OniCoop
             ref Last l = ref r.last[i];
             bool same = l.known && l.anim == anim && l.mode == mode && Mathf.Abs(l.speed - speed) <= 0.01f;
             if (started && same && stamp - l.at < 0.05f) return; // the same start twice in a moment (Play, then its queue)
+            float rot = c.Rotation;
+            bool turned = !l.known || Mathf.Abs(Mathf.DeltaAngle(l.rot, rot)) > 0.3f;
+            if (l.known && turned && spinning.Add(((long)r.k.InstanceID << 8) | (uint)i)) spinList.Add(new KeyValuePair<BRef, int>(r, i));
             bool changed = started || !same;
             if (!changed && mode == (byte)KAnim.PlayMode.Paused)
                 changed = Mathf.Abs(l.elapsed - elapsed) > Mathf.Max(0.02f * c.CurrentAnim.totalTime, 0.001f); // a meter moved
             if (!changed && mode == (byte)KAnim.PlayMode.Once && elapsed + 0.05f < l.elapsed) changed = true; // played again
             if (mode != (byte)KAnim.PlayMode.Paused) l.elapsed = elapsed; // keeps "played again" detection current
-            if (!changed) return;
+            bool rotOnly = !changed && turned;
+            if (!changed && !turned) return;
             // an animation that ran shorter than a full slice pass: the old way (find changes by sampling) would likely
             // have missed it (a door's "opening" / "closing")
             if (l.known && started && stamp - l.at < Slices * Mathf.Max(Time.unscaledDeltaTime, 0.016f))
@@ -187,9 +203,10 @@ namespace OniCoop
                 if (sc > 0 || shortBy.Count < 40) shortBy[n] = sc + 1;
             }
             if (started) EventRecords++;
-            l = new Last { known = true, anim = anim, mode = mode, speed = speed, elapsed = elapsed, at = stamp };
+            l = new Last { known = true, anim = anim, mode = mode, speed = speed, elapsed = rotOnly ? l.elapsed : elapsed, at = rotOnly ? l.at : stamp, rot = rot };
             bufW.Write(stamp); bufW.Write(r.k.InstanceID); bufW.Write(r.ranks[i]); bufW.Write(r.names[i]);
             bufW.Write(anim); bufW.Write(mode); bufW.Write(speed); bufW.Write(elapsed);
+            bufW.Write(rot); bufW.Write(rotOnly);
             records++;
         }
 
@@ -213,7 +230,7 @@ namespace OniCoop
         /// <summary>Guest: an animation the host drives (local logic may not change it).</summary>
         public static bool IsMirrored(KAnimControllerBase c) => mirrored.Count > 0 && mirrored.Contains(c);
 
-        private struct Pending { public float at, speed, elapsed; public int id, rank, name, anim; public byte mode; }
+        private struct Pending { public float at, speed, elapsed, rot; public int id, rank, name, anim; public byte mode; public bool rotOnly; }
         private static readonly Queue<Pending> timeline = new Queue<Pending>();
         public static long GuestLate;
         public static float GuestAheadSum, GuestLateMax;
@@ -229,7 +246,7 @@ namespace OniCoop
                 var p = new Pending
                 {
                     at = r.ReadSingle(), id = r.ReadInt32(), rank = r.ReadByte(), name = r.ReadInt32(), anim = r.ReadInt32(),
-                    mode = r.ReadByte(), speed = r.ReadSingle(), elapsed = r.ReadSingle(),
+                    mode = r.ReadByte(), speed = r.ReadSingle(), elapsed = r.ReadSingle(), rot = r.ReadSingle(), rotOnly = r.ReadBoolean(),
                 };
                 if (rt >= 0f)
                 {
@@ -261,7 +278,9 @@ namespace OniCoop
                     timeline.Dequeue();
                     KBatchedAnimController c = Resolve(p.id, p.rank, p.name);
                     if (c == null) { GuestUnknown++; continue; }
-                    Apply(c, p.anim, p.mode, p.speed, p.elapsed);
+                    mirrored.Add(c);
+                    if (Mathf.Abs(Mathf.DeltaAngle(c.Rotation, p.rot)) > 0.01f) c.Rotation = p.rot;
+                    if (!p.rotOnly) Apply(c, p.anim, p.mode, p.speed, p.elapsed);
                     GuestApplied++;
                 }
             }
@@ -527,6 +546,23 @@ namespace OniCoop
         private static bool Prefix(KAnimControllerBase __instance)
         {
             if (!Puppets.Mirroring || BuildingSync.Applying || !BuildingSync.IsMirrored(__instance)) return true;
+            BuildingSync.Blocked++;
+            return false;
+        }
+    }
+}
+
+namespace OniCoop
+{
+    using HarmonyLib;
+
+    /// <summary>Guest: a building part the host turns (a missile launcher's cannon) isn't turned by local logic.</summary>
+    [HarmonyPatch(typeof(KAnimControllerBase), nameof(KAnimControllerBase.Rotation), MethodType.Setter)]
+    internal static class KAnim_SetRotation_Patch
+    {
+        private static bool Prefix(KAnimControllerBase __instance)
+        {
+            if (!Puppets.Mirroring || BuildingSync.Applying || Puppets.Applying || Meteors.Applying || !BuildingSync.IsMirrored(__instance)) return true;
             BuildingSync.Blocked++;
             return false;
         }

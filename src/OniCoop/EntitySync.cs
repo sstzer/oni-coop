@@ -900,7 +900,8 @@ namespace OniCoop
             KPrefabID k = Find(id);
             if (k == null) { GuestItemMissing++; return; }
             GuestItems++;
-            MoveTo(k.gameObject, container, idx, new Vector3(x, y, 0f));
+            // a missile in flight is placed by the timeline (Meteors); 4 updates a second would make it jump
+            if (!(container < 0 && Meteors.IsMover(id))) MoveTo(k.gameObject, container, idx, new Vector3(x, y, 0f));
             var pe = k.GetComponent<PrimaryElement>();
             if (pe == null) return;
             if (Mathf.Abs(pe.Mass - mass) > Mathf.Max(0.005f * mass, 0.001f)) pe.Mass = mass;

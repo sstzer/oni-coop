@@ -54,7 +54,8 @@ for n in range(1, 10):
         if k not in B or A[k][1] != B[k][1]: continue
         a, b = A[k], B[k]
         if a[5] != b[5] or a[6] != b[6]: cont_diff.append((a[1], a[5], b[5])); continue
-        if a[7] == '0' and a[5] == '-1' and math.hypot(float(a[2]) - float(b[2]), float(a[3]) - float(b[3])) > 0.6:
+        # (meteors in flight: compared at the timeline's moment in the meteors section below)
+        if a[7] == '0' and a[5] == '-1' and not a[1].endswith('Comet') and math.hypot(float(a[2]) - float(b[2]), float(a[3]) - float(b[3])) > 0.6:
             pos_diff.append((a[1], a[2], a[3], b[2], b[3]))
         if a[4] != '-' and b[4] != '-':
             ma, mb = float(a[4]), float(b[4])
@@ -282,3 +283,19 @@ for n in range(1, 10):
             if len(ex[key]) < 3: ex[key].append((k[1], a, b))
     print(f"operation sync{n}: {dict(cnt)}; differ {dict(bad)}")
     for key, v in ex.items(): print(f"   {key}: {v}")
+
+# ---- meteors in flight (Meteors), taken when the guest's timeline shows the test moment
+for n in range(1, 10):
+    fa, fb = os.path.join(d, f"{HOST}_sync{n}_movers.txt"), os.path.join(d, f"Bob_sync{n}_movers.txt")
+    if not (os.path.exists(fa) and os.path.exists(fb)): continue
+    def load_m(f):
+        r = {}
+        for line in open(f, encoding='utf-8'):
+            p = line.split()
+            if len(p) >= 5 and p[0] == 'M': r[p[1]] = (p[2], float(p[3]), float(p[4]))
+        return r
+    A, B = load_m(fa), load_m(fb)
+    both = [k for k in A if k in B]
+    errs = sorted((math.hypot(A[k][1] - B[k][1], A[k][2] - B[k][2]), A[k][0]) for k in both)
+    print(f"meteors sync{n}: host {len(A)}, guest {len(B)}, matched {len(both)}; only host {len(set(A) - set(B))}, only guest {len(set(B) - set(A))}; "
+          f"position error max {errs[-1][0] if errs else 0:.2f} mean {sum(e for e, _ in errs) / len(errs) if errs else 0:.2f}")

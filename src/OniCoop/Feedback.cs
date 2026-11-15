@@ -19,7 +19,7 @@ namespace OniCoop
     /// these is kept from showing them (they would be its guesses, and double).</summary>
     internal static class Feedback
     {
-        private const byte RBarNew = 1, RBar = 2, RBarGone = 3, RPop = 4;
+        private const byte RBarNew = 1, RBar = 2, RBarGone = 3, RPop = 4, RFx = 5;
 
         /// <summary>Guest: the mirror is making these right now.</summary>
         public static bool Applying;
@@ -165,6 +165,28 @@ namespace OniCoop
             return true;
         }
 
+        /// <summary>Server: one of the game's effects (explosions, splashes... Game.SpawnFX), before the server's own
+        /// camera would cull it. Guest: its own are kept from showing (the server's come).</summary>
+        private static bool SpawnFxCellPrefix(SpawnFXHashes fx_id, int cell, float rotation) => FxAt(fx_id, Grid.CellToPosCBC(cell, Grid.SceneLayer.Front), rotation, true);
+        private static bool SpawnFxPosPrefix(SpawnFXHashes fx_id, Vector3 pos, float rotation) => FxAt(fx_id, pos, rotation, false);
+
+        /// <param name="cull">the game shows it only when in the camera's view (each viewer's own camera here)</param>
+        private static bool FxAt(SpawnFXHashes fx, Vector3 pos, float rotation, bool cull)
+        {
+            if (CommandBus.Active && CommandBus.IsHost)
+            {
+                if (!HostLive) return true;
+                bufW.Write(RFx); bufW.Write(Puppets.Clock); bufW.Write(cull ? -1 - (int)fx : (int)fx); bufW.Write(pos.x); bufW.Write(pos.y); bufW.Write(pos.z); bufW.Write(rotation);
+                records++;
+                HostFx++;
+                return true;
+            }
+            if (Puppets.Mirroring && !Applying) { BlockedLocalFx++; return false; }
+            return true;
+        }
+
+        public static long HostFx, GuestFx, BlockedLocalFx, CulledFx;
+
         public static bool HasTimeline => records > 0;
 
         public static void TakeTimeline(BinaryWriter w)
@@ -209,6 +231,9 @@ namespace OniCoop
                         break;
                     case RBar: p.id = r.ReadInt32(); p.pct = r.ReadSingle(); p.visible = r.ReadBoolean(); break;
                     case RBarGone: p.id = r.ReadInt32(); break;
+                    case RFx:
+                        p.id = r.ReadInt32(); p.x = r.ReadSingle(); p.y = r.ReadSingle(); p.pct = r.ReadSingle(); p.lifetime = r.ReadSingle();
+                        break;
                     case RPop:
                         p.main = Inflate.ReadId(r); p.second = Inflate.ReadId(r); p.text = Inflate.ReadId(r);
                         p.entity = r.ReadInt32(); p.x = r.ReadSingle(); p.y = r.ReadSingle(); p.lifetime = r.ReadSingle(); p.flags = r.ReadByte();
@@ -269,6 +294,17 @@ namespace OniCoop
                         if (gone.bar != null) gone.bar.gameObject.DeleteObject();
                         guestBars.Remove(p.id);
                     }
+                    break;
+                case RFx:
+                    // (id: the effect, pct: z, lifetime: rotation)
+                {
+                    if (Game.Instance == null) return;
+                    var at = new Vector3(p.x, p.y, p.pct);
+                    bool cull = p.id < 0;
+                    if (cull && (CameraController.Instance == null || !CameraController.Instance.IsVisiblePos(at))) { CulledFx++; return; }
+                    Game.Instance.SpawnFX((SpawnFXHashes)(cull ? -1 - p.id : p.id), at, p.lifetime);
+                    GuestFx++;
+                }
                     break;
                 case RPop:
                 {
@@ -348,6 +384,10 @@ namespace OniCoop
                 h.Patch(AccessTools.Method(typeof(ProgressBar), nameof(ProgressBar.CreateProgressBar), new[] { typeof(GameObject), typeof(Func<float>), typeof(Vector3) }),
                     postfix: new HarmonyMethod(typeof(Feedback), nameof(CreateBarPostfix)));
                 h.Patch(AccessTools.Method(typeof(ProgressBar), nameof(ProgressBar.SetVisibility)), prefix: new HarmonyMethod(typeof(Feedback), nameof(SetVisibilityPrefix)));
+                h.Patch(AccessTools.Method(typeof(Game), nameof(Game.SpawnFX), new[] { typeof(SpawnFXHashes), typeof(int), typeof(float) }),
+                    prefix: new HarmonyMethod(typeof(Feedback), nameof(SpawnFxCellPrefix)));
+                h.Patch(AccessTools.Method(typeof(Game), nameof(Game.SpawnFX), new[] { typeof(SpawnFXHashes), typeof(Vector3), typeof(float) }),
+                    prefix: new HarmonyMethod(typeof(Feedback), nameof(SpawnFxPosPrefix)));
                 h.Patch(AccessTools.Method(typeof(PopFXManager), nameof(PopFXManager.SpawnFX),
                         new[] { typeof(Sprite), typeof(Sprite), typeof(string), typeof(Transform), typeof(Vector3), typeof(float), typeof(bool), typeof(bool), typeof(bool) }),
                     prefix: new HarmonyMethod(typeof(Feedback), nameof(SpawnFxPrefix)));
@@ -356,7 +396,7 @@ namespace OniCoop
         }
 
         public static string Report(bool host) => host
-            ? $"feedback: {HostBars} progress bars ({HostBarUpdates} updates), {HostPops} floating texts"
-            : $"feedback: {GuestBars} progress bars shown, {GuestPops} floating texts; own ones kept hidden: {BlockedLocalBars} bars, {BlockedLocalPops} texts; sprites not found {MissingSprites}";
+            ? $"feedback: {HostBars} progress bars ({HostBarUpdates} updates), {HostPops} floating texts, {HostFx} effects"
+            : $"feedback: {GuestBars} progress bars shown, {GuestPops} floating texts, {GuestFx} effects ({CulledFx} out of view); own ones kept hidden: {BlockedLocalBars} bars, {BlockedLocalPops} texts, {BlockedLocalFx} effects; sprites not found {MissingSprites}";
     }
 }

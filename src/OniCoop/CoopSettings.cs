@@ -54,6 +54,9 @@ namespace OniCoop
 
         /// <summary>Serialize the world with cached type facts and compiled field readers (FastSave): same bytes, faster.</summary>
         public bool fastSave = true;
+
+        /// <summary>Test: the server starts meteor showers during the cmds autotest.</summary>
+        public bool testMeteors;
         /// <summary>Quit the game this many seconds after entering a game (0 = never).</summary>
         public float quitAfter = 0;
 
@@ -120,6 +123,7 @@ namespace OniCoop
                     case "profile": profile = float.Parse(v, System.Globalization.CultureInfo.InvariantCulture); break;
                     case "profile-deep": profileDeep = v != "false" && v != "0"; break;
                     case "fastsave": fastSave = v != "false" && v != "0"; break;
+                    case "test-meteors": testMeteors = v != "false" && v != "0"; break;
                     case "quit-after": quitAfter = float.Parse(v, System.Globalization.CultureInfo.InvariantCulture); break;
                     default: Log.Warn($"unknown launch option {a}"); continue;
                 }

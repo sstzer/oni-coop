@@ -98,6 +98,13 @@ namespace OniCoop.Net
 
         readonly object gate = new object();
         readonly Queue<Outgoing> tcpOut = new Queue<Outgoing>();
+        // The host's backup saves: sent only while nothing else waits, and paced, so a 5 MB backup never sits in front
+        // of the game's own messages (on a slow uplink it delayed the duplicants' timeline by over a second).
+        readonly Queue<Outgoing> bulkOut = new Queue<Outgoing>();
+        long bulkNextAt;
+        /// <summary>Pace of backup uploads (bytes per second).</summary>
+        public int BackupRate = 96 * 1024;
+        const int BackupChunk = 16 * 1024;
         readonly List<Outgoing> udpOut = new List<Outgoing>();
         readonly List<Incoming> inbox = new List<Incoming>();
         long lastTcpOutDue, lastTcpInDue;
@@ -118,6 +125,8 @@ namespace OniCoop.Net
 
         // Save transfer progress (read from any thread).
         public long UploadSent, UploadTotal, DownloadReceived, DownloadTotal;
+        // Everything sent / received over TCP, frames included (read from any thread).
+        public long TcpBytesOut, TcpBytesIn;
 
         volatile bool netWelcomed, udpReady;
 
@@ -151,27 +160,54 @@ namespace OniCoop.Net
         private readonly object saveSendLock = new object();
 
         /// <summary>A save (requestId 0: the host's own save, kept by the relay as a backup). Its frames go out together:
-        /// two uploads from two threads must not interleave.</summary>
+        /// two uploads from two threads must not interleave (the relay takes one upload at a time). A backup goes out in
+        /// the background (<see cref="bulkOut"/>); a save someone is waiting for first pushes out what is left of a
+        /// backup, then goes in the normal order.</summary>
         public void SendSave(uint requestId, string name, byte[] data)
         {
             lock (saveSendLock)
             {
                 byte[] hash;
                 using (var sha = SHA256.Create()) hash = sha.ComputeHash(data);
-                Interlocked.Exchange(ref UploadSent, 0);
-                Interlocked.Exchange(ref UploadTotal, data.Length);
-                SendTcp(Msg.SaveBegin, new SaveBeginMsg { requestId = requestId, name = name, size = data.Length, sha256 = hash }.Encode());
-                for (int off = 0; off < data.Length; off += Proto.SaveChunk)
+                bool backup = requestId == 0;
+                if (!backup)
                 {
-                    int n = Math.Min(Proto.SaveChunk, data.Length - off);
+                    lock (gate)
+                    {
+                        while (bulkOut.Count > 0) EnqueueTcp(bulkOut.Dequeue().bytes, 0);
+                        Interlocked.Exchange(ref UploadSent, 0);
+                        Interlocked.Exchange(ref UploadTotal, data.Length);
+                    }
+                }
+                Action<Msg, byte[], int> send = backup ? (Action<Msg, byte[], int>)SendBulk : SendTcp;
+                send(Msg.SaveBegin, new SaveBeginMsg { requestId = requestId, name = name, size = data.Length, sha256 = hash }.Encode(), 0);
+                int chunk = backup ? BackupChunk : Proto.SaveChunk;
+                for (int off = 0; off < data.Length; off += chunk)
+                {
+                    int n = Math.Min(chunk, data.Length - off);
                     var payload = new byte[4 + n];
                     BitConverter.GetBytes(requestId).CopyTo(payload, 0);
                     Buffer.BlockCopy(data, off, payload, 4, n);
-                    SendTcp(Msg.SaveChunk, payload, n);
+                    send(Msg.SaveChunk, payload, backup ? 0 : n);
                 }
-                SendTcp(Msg.SaveEnd, BitConverter.GetBytes(requestId));
+                send(Msg.SaveEnd, BitConverter.GetBytes(requestId), 0);
             }
         }
+
+        /// <summary>Backup frames: after everything else, at <see cref="BackupRate"/>.</summary>
+        void SendBulk(Msg type, byte[] payload, int saveBytes)
+        {
+            if (closed || closing) return;
+            byte[] frame = Wire.Frame(type, payload);
+            lock (gate)
+            {
+                bulkOut.Enqueue(new Outgoing { due = NowMs, bytes = frame });
+                Monitor.PulseAll(gate);
+            }
+        }
+
+        /// <summary>Backup frames still waiting (the panel can show a backup in progress).</summary>
+        public int BackupFramesLeft { get { lock (gate) return bulkOut.Count; } }
 
         public void SendPresence(PresenceData p) => SendUnreliable(Msg.Presence, p.Encode());
 
@@ -228,6 +264,7 @@ namespace OniCoop.Net
         {
             if (closed || closing) return;
             if (stream == null) { Shutdown(reason ?? "closed"); return; }
+            lock (gate) while (bulkOut.Count > 0) EnqueueTcp(bulkOut.Dequeue().bytes, 0); // a backup still going: at full speed
             SendTcp(Msg.Bye, Wire.Build(w => w.Write(reason ?? "")));
             closing = true;
             closingReason = reason ?? "closed";
@@ -244,14 +281,17 @@ namespace OniCoop.Net
         {
             if (closed || closing) return;
             byte[] frame = Wire.Frame(type, payload);
-            lock (gate)
-            {
-                long due = NowMs + SimDelay();
-                if (due < lastTcpOutDue) due = lastTcpOutDue; // a TCP stream never reorders
-                lastTcpOutDue = due;
-                tcpOut.Enqueue(new Outgoing { due = due, bytes = frame, saveBytes = saveBytes });
-                Monitor.PulseAll(gate);
-            }
+            lock (gate) EnqueueTcp(frame, saveBytes);
+        }
+
+        /// <summary>(holding <see cref="gate"/>)</summary>
+        void EnqueueTcp(byte[] frame, int saveBytes)
+        {
+            long due = NowMs + SimDelay();
+            if (due < lastTcpOutDue) due = lastTcpOutDue; // a TCP stream never reorders
+            lastTcpOutDue = due;
+            tcpOut.Enqueue(new Outgoing { due = due, bytes = frame, saveBytes = saveBytes });
+            Monitor.PulseAll(gate);
         }
 
         void SendUnreliable(Msg type, byte[] payload)
@@ -359,6 +399,7 @@ namespace OniCoop.Net
                 {
                     byte[] p = Wire.ReadFrame(stream, header, out Msg type);
                     if (p == null) { Shutdown("relay closed the connection"); return; }
+                    Interlocked.Add(ref TcpBytesIn, p.Length + header.Length + 1);
                     HandleTcp(type, p);
                 }
             }
@@ -543,21 +584,29 @@ namespace OniCoop.Net
                 {
                     Outgoing o;
                     bool isUdp;
+                    long now;
                     lock (gate)
                     {
                         while (true)
                         {
                             if (closed) return;
-                            long now = NowMs;
+                            now = NowMs;
                             long next = long.MaxValue;
                             if (tcpOut.Count > 0) next = tcpOut.Peek().due;
                             if (udpOut.Count > 0) next = Math.Min(next, udpOut[0].due);
+                            // a backup frame only when nothing else is waiting, at the backup pace
+                            if (tcpOut.Count == 0 && bulkOut.Count > 0) next = Math.Min(next, Math.Max(bulkNextAt, bulkOut.Peek().due));
                             if (next <= now) break;
                             Monitor.Wait(gate, next == long.MaxValue ? 1000 : (int)Math.Min(1000, next - now));
                         }
-                        isUdp = udpOut.Count > 0 && (tcpOut.Count == 0 || udpOut[0].due <= tcpOut.Peek().due);
+                        isUdp = udpOut.Count > 0 && udpOut[0].due <= now && (tcpOut.Count == 0 || udpOut[0].due <= tcpOut.Peek().due);
                         if (isUdp) { o = udpOut[0]; udpOut.RemoveAt(0); }
-                        else o = tcpOut.Dequeue();
+                        else if (tcpOut.Count > 0 && tcpOut.Peek().due <= now) o = tcpOut.Dequeue();
+                        else
+                        {
+                            o = bulkOut.Dequeue();
+                            bulkNextAt = Math.Max(now, bulkNextAt) + o.bytes.Length * 1000L / Math.Max(1024, BackupRate);
+                        }
                     }
                     if (isUdp)
                     {
@@ -567,6 +616,7 @@ namespace OniCoop.Net
                     else
                     {
                         stream.Write(o.bytes, 0, o.bytes.Length);
+                        Interlocked.Add(ref TcpBytesOut, o.bytes.Length);
                         if (o.saveBytes > 0) Interlocked.Add(ref UploadSent, o.saveBytes);
                         if (o.bytes[4] == (byte)Msg.Bye) { stream.Flush(); Shutdown(closingReason ?? "closed"); return; }
                     }

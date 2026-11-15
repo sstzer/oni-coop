@@ -23,7 +23,7 @@ namespace OniCoop
     {
         public const byte ChPuppets = 5;
         private const int TimelineMark = int.MinValue; // (no entity has this id) what follows: a section of other records
-        private const byte SectionBuildings = 1, SectionFeedback = 2;
+        private const byte SectionBuildings = 1, SectionFeedback = 2, SectionMeteors = 3;
         private const float SampleInterval = 0.1f;   // a walking entity's position is sampled this often
         private const float SendInterval = 0.1f;     // pending keyframes go out this often (each message costs the guest
                                                      // a decompressor, ~7 KB of garbage: 20/s made it collect every 15 s)
@@ -270,6 +270,7 @@ namespace OniCoop
                 // progress bars and floating texts (Feedback)
                 if (BuildingSync.HasTimeline) { w.Write(TimelineMark); w.Write(SectionBuildings); BuildingSync.TakeTimeline(w); }
                 if (Feedback.HasTimeline) { w.Write(TimelineMark); w.Write(SectionFeedback); Feedback.TakeTimeline(w); }
+                if (Meteors.HasTimeline) { w.Write(TimelineMark); w.Write(SectionMeteors); Meteors.TakeTimeline(w); }
             }
             // sent even when empty: a guest knows the host's timeline reached "now" (nothing moved), so it can tell
             // a quiet moment from a stalled stream
@@ -482,8 +483,11 @@ namespace OniCoop
             return t;
         }
 
+        private static readonly List<float> phaseLag = new List<float>(4096); // this probe phase's samples
+
         private static void ObserveLag(float d)
         {
+            if (phaseLag.Count < 50000) phaseLag.Add(d);
             lagSamples[lagNext] = d;
             lagNext = (lagNext + 1) % LagWindow;
             if (lagCount < LagWindow) lagCount++;
@@ -551,6 +555,7 @@ namespace OniCoop
                         byte section = r.ReadByte();
                         if (section == SectionBuildings) BuildingSync.ReadTimeline(r);
                         else if (section == SectionFeedback) Feedback.ReadTimeline(r);
+                        else if (section == SectionMeteors) Meteors.ReadTimeline(r);
                         else throw new InvalidDataException("puppets: unknown timeline section " + section);
                         continue;
                     }
@@ -644,6 +649,7 @@ namespace OniCoop
             finally { Applying = false; }
             BuildingSync.ApplyTimeline(renderTime);
             Feedback.ApplyTimeline(renderTime);
+            Meteors.ApplyTimeline(renderTime);
             if (now >= nextReport)
             {
                 if (nextReport > 0) Log.Info("puppets: " + GuestReport());
@@ -666,6 +672,36 @@ namespace OniCoop
             System.Array.Clear(stepBySpeed, 0, stepBySpeed.Length);
             stepByNav.Clear();
             probeLast = 0f;
+            phaseLag.Clear();
+            OniCoop.Net.CoopClient c = CommandBus.Client;
+            probeNetOut = c != null ? System.Threading.Interlocked.Read(ref c.TcpBytesOut) : 0;
+            probeNetIn = c != null ? System.Threading.Interlocked.Read(ref c.TcpBytesIn) : 0;
+            probeNetAt = Clock;
+        }
+
+        private static long probeNetOut, probeNetIn;
+        private static float probeNetAt;
+
+        /// <summary>This phase's traffic over TCP (everything this game sent and got through the relay).</summary>
+        private static string NetReport()
+        {
+            OniCoop.Net.CoopClient c = CommandBus.Client;
+            float secs = Clock - probeNetAt;
+            if (c == null || secs <= 0f) return "network -";
+            long o = System.Threading.Interlocked.Read(ref c.TcpBytesOut) - probeNetOut, i = System.Threading.Interlocked.Read(ref c.TcpBytesIn) - probeNetIn;
+            return $"network out {o / 1024f / secs:F1} KB/s, in {i / 1024f / secs:F1} KB/s";
+        }
+
+        /// <summary>How much later than the fastest message this phase's messages came (the line's and the server's
+        /// unevenness together).</summary>
+        private static string DelayReport()
+        {
+            if (phaseLag.Count == 0 || lagCount == 0) return "message delay -";
+            var l = new List<float>(phaseLag);
+            l.Sort();
+            float b = lagSorted[0];
+            float P(float q) => (l[Mathf.Min(l.Count - 1, (int)(l.Count * q))] - b) * 1000f;
+            return $"message delay over the fastest: median {P(0.5f):F0}, p90 {P(0.9f):F0}, p98 {P(0.98f):F0}, max {(l[l.Count - 1] - b) * 1000f:F0} ms ({l.Count} messages)";
         }
 
         private static void Hitch(float dtMs)
@@ -746,11 +782,12 @@ namespace OniCoop
             {
                 var nav = new List<string>();
                 foreach (var kv in stepByNav) nav.Add(kv.Key + " " + kv.Value);
-                return $"{frames}; instant steps {PSteps} (by cells per game second <5/5-10/10-20/20-40/>40: {string.Join("/", System.Array.ConvertAll(stepBySpeed, x => x.ToString()))}; by nav: {string.Join(", ", nav.ToArray())})";
+                return $"{frames}; {NetReport()}; instant steps {PSteps} (by cells per game second <5/5-10/10-20/20-40/>40: {string.Join("/", System.Array.ConvertAll(stepBySpeed, x => x.ToString()))}; by nav: {string.Join(", ", nav.ToArray())})";
             }
             return $"{frames}; moving {PMovingFrames} entity-frames, out of data while moving {PStarvedFrames} entity-frames ({PStarveEpisodes} times, " +
                    $"{(PMovingFrames > 0 ? 100f * PStarvedFrames / (PMovingFrames + PStarvedFrames) : 0):F2} %), snaps after that {PSnaps}; " +
-                   $"waiting for data {PWaitTime:F1} s, skipped server dead time {PSkipped:F1} s, playing slower {PSlowTime:F1} s, faster {PFastTime:F1} s; buffer {BufferMs:F0} ms, jitter p98 {JitterP95 * 1000f:F0} ms";
+                   $"waiting for data {PWaitTime:F1} s, skipped server dead time {PSkipped:F1} s, playing slower {PSlowTime:F1} s, faster {PFastTime:F1} s; buffer {BufferMs:F0} ms, jitter p98 {JitterP95 * 1000f:F0} ms; " +
+                   $"{DelayReport()}; {NetReport()}";
         }
 
         public static string GuestReport() =>
